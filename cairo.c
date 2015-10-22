@@ -161,39 +161,41 @@ void draw_rectangles(cairo_t *fbcr, struct tsdev *ts, cairo_linuxfb_device_t *de
 	srand(time(NULL));
 
 	while (!cancel) {
-		cairo_set_source_rgb(cr, r, g, b);
-
-		if (ts) {
-			/* Pressure is our identication whether we act on axis... */
-			sample.pressure = 0;
-			ts_read(ts, &sample, 1);
-
-			cairo_identity_matrix(cr);
-			if (sample.pressure > 0) {
-				scale -= 0.02f;
-				cairo_translate(cr, sample.x - fbsizex / 2,
-						sample.y - fbsizey / 2);
-				cairo_scale(cr, scale, scale);
-				r = ((float)(rand() % fbsizey)) / sample.y;
-				g = ((float)(rand() % fbsizex)) / sample.x;
-				b = ((float)(rand() % fbsizex)) / (fbsizex - sample.x);
-			} else {
-				scale = 1.0f;
-				r = (rand() % 100) / 100.0;
-				g = (rand() % 100) / 100.0;
-				b = (rand() % 100) / 100.0;
-			}
-			printf("%d %d %d\n", sample.x, sample.y, sample.pressure);
-
-			/* Just discard all the other samples... */
-			while (ts_read(ts, &sample, 1));
-		}
-
+		r = (rand() % 100) / 100.0;
+		g = (rand() % 100) / 100.0;
+		b = (rand() % 100) / 100.0;
 		startx = rand() % fbsizex;
 		starty = rand() % fbsizey;
 		sizex = rand() % (fbsizex - startx);
 		sizey = rand() % (fbsizey - starty);
 
+		cairo_identity_matrix(cr);
+		if (ts) {
+			int pressed = 0;
+
+			/* Pressure is our identication whether we act on axis... */
+			while (ts_read(ts, &sample, 1)) {
+				if (sample.pressure > 0)
+					pressed = 1;
+			}
+
+			if (pressed) {
+				scale *= 1.05f;
+				cairo_translate(cr, sample.x, sample.y);
+				cairo_scale(cr, scale, scale);
+				//r = g = b = 0;
+				startx = -5;
+				starty = -5;
+				sizex = 10;
+				sizey = 10;
+			} else {
+				scale = 1.0f;
+			}
+
+			/* Just discard all the other samples... */
+		}
+
+		cairo_set_source_rgb(cr, r, g, b);
 		cairo_rectangle(cr, startx, starty, sizex, sizey);
 		cairo_stroke_preserve(cr);
 		cairo_fill(cr);
