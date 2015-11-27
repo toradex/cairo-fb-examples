@@ -5,8 +5,8 @@ LIB_PATH = "-L${SYSROOTS}/colibri-vf/usr/lib"
 LDFLAGS = -lcairo -lts
 CFLAGS = -O2 -g -march=armv7-a -mfpu=neon --sysroot=${SYSROOTS}/colibri-vf/
 
-cairo: cairo.c
-	${CC} ${CFLAGS} ${INCLUDES} ${LIB_PATH} ${LDFLAGS} -o cairo cairo.c
+rectangles: rectangles.c
+	${CC} ${CFLAGS} ${INCLUDES} ${LIB_PATH} ${LDFLAGS} -o $@ $^
 
 clean:
 	rm -rf cairo

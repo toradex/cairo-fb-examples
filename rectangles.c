@@ -1,5 +1,5 @@
 /*
- * Drawing rectangles on a Cairo surface
+ * Demo application drawing rectangles on screen using fbdev
  *
  * This demo shows how to use the fbdev API to sync to vertical blank
  * on Colibri VF50/VF61
@@ -21,11 +21,7 @@
 #include <cairo/cairo.h>
 #include <tslib.h>
 
-#define DELAY_IN_SECS    5
-#define SCALE_WIDTH      256.0
-#define SCALE_HEIGHT     256.0
-
-int cancel = 0;
+static int cancel = 0;
 
 typedef struct _cairo_linuxfb_device {
 	int fb_fd;
