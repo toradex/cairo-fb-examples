@@ -1,3 +1,14 @@
+/*
+ * Drawing rectangles on a Cairo surface
+ *
+ * This demo shows how to use the fbdev API to sync to vertical blank
+ * on Colibri VF50/VF61
+ *
+ * Copyright (c) 2015, Toradex AG
+ *
+ * This project is licensed under the terms of the MIT license (see
+ * LICENSE)
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
