@@ -39,29 +39,25 @@ void signal_handler(int signum)
 /*
  * Flip framebuffer, return the next buffer id which will be used
  */
-int flip_buffer(cairo_linuxfb_device_t *device, int vsync)
+int flip_buffer(cairo_linuxfb_device_t *device, int vsync, int bufid)
 {
-	static int id = 0;
 	int dummy = 0;
 
 	/* Pan the framebuffer */
-	device->fb_vinfo.yoffset = device->fb_vinfo.yres * id;
+	device->fb_vinfo.yoffset = device->fb_vinfo.yres * bufid;
 	if (ioctl(device->fb_fd, FBIOPAN_DISPLAY, &device->fb_vinfo)) {
 		perror("Error panning display");
 		return -1;
 	}
 
-	id = !id;
-
-	if (!vsync)
-		return id;
-
-	if (ioctl(device->fb_fd, FBIO_WAITFORVSYNC, &dummy)) {
-		perror("Error waiting for VSYNC");
-		return -1;
+	if (vsync) {
+		if (ioctl(device->fb_fd, FBIO_WAITFORVSYNC, &dummy)) {
+			perror("Error waiting for VSYNC");
+			return -1;
+		}
 	}
 
-	return id;
+	return 0;
 }
 
 
@@ -141,7 +137,7 @@ handle_allocate_error:
 
 void draw_rectangles(cairo_t *fbcr, struct tsdev *ts, cairo_linuxfb_device_t *device)
 {
-	int bufid = 0;
+	int bufid = 1; /* start drawing into second buffer */
 	float r, g, b;
 	int fbsizex = device->fb_vinfo.xres;
 	int fbsizey = device->fb_vinfo.yres;
@@ -210,9 +206,14 @@ void draw_rectangles(cairo_t *fbcr, struct tsdev *ts, cairo_linuxfb_device_t *de
 		/* Draw to framebuffer at y offset according to current buffer.. */
 		cairo_set_source_surface(fbcr, surface, 0, bufid * fbsizey);
 		cairo_paint(fbcr);
-		bufid = flip_buffer(device, 1);
+		flip_buffer(device, 1, bufid);
+		/* Switch buffer ID for next draw */
+		bufid = !bufid;
 		usleep(20000);
 	}
+
+	/* Make sure we leave with buffer 0 enabled */
+	flip_buffer(device, 1, 0);
 
 	/* Destroy and release all cairo related contexts */
 	cairo_destroy(cr);
