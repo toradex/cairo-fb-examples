@@ -21,7 +21,7 @@
 #include <cairo/cairo.h>
 #include <tslib.h>
 
-static int cancel = 0;
+static volatile sig_atomic_t cancel = 0;
 
 typedef struct _cairo_linuxfb_device {
 	int fb_fd;
@@ -194,8 +194,6 @@ void draw_rectangles(cairo_t *fbcr, struct tsdev *ts, cairo_linuxfb_device_t *de
 			} else {
 				scale = 1.0f;
 			}
-
-			/* Just discard all the other samples... */
 		}
 
 		cairo_set_source_rgb(cr, r, g, b);
@@ -207,6 +205,7 @@ void draw_rectangles(cairo_t *fbcr, struct tsdev *ts, cairo_linuxfb_device_t *de
 		cairo_set_source_surface(fbcr, surface, 0, bufid * fbsizey);
 		cairo_paint(fbcr);
 		flip_buffer(device, 1, bufid);
+
 		/* Switch buffer ID for next draw */
 		bufid = !bufid;
 		usleep(20000);
@@ -224,6 +223,7 @@ int main(int argc, char *argv[]) {
 	char fb_node[16] = "/dev/fb0";
 	char *tsdevice = NULL;
 	struct tsdev *ts;
+	struct sigaction action;
 	cairo_linuxfb_device_t *device;
 	cairo_surface_t *fbsurface;
 	cairo_t *fbcr;
@@ -249,6 +249,11 @@ int main(int argc, char *argv[]) {
 		perror("Error: cannot allocate memory\n");
 		exit(1);
 	}
+
+	memset(&action, 0, sizeof(struct sigaction));
+	action.sa_handler = signal_handler;
+	sigaction(SIGTERM, &action, NULL);
+	sigaction(SIGINT, &action, NULL);
 
 	fbsurface = cairo_linuxfb_surface_create(device, fb_node);
 	fbcr = cairo_create(fbsurface);
