@@ -1,3 +1,16 @@
+/*
+ * Demo application drawing rectangles screen using DRM/KMS
+ *
+ * This demo shows how to use the DRM/KMS API to draw to the screen
+ * using double buffering with page flip which is synced to vertical
+ * blanking period. Tested on Colibri VF50/VF61
+ *
+ * Copyright (c) 2015, Toradex AG
+ * Copyright (c) 2012, Wayne Wolf (kms-pageflip.c)
+ *
+ * This project is licensed under the terms of the MIT license (see
+ * LICENSE)
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,11 +21,14 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <math.h>
+#include <signal.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm/drm_fourcc.h>
 #include <libkms.h>
 #include <cairo.h>
+
+static volatile sig_atomic_t cancel = 0;
 
 struct buffer {
 	int bo_handles[4];
@@ -23,13 +39,18 @@ struct buffer {
 	struct kms_bo *kms_bo;
 };
 
-struct flip_context{
+struct flip_context {
 	struct buffer *buffers[2];
 	int current_fb_id;
 	int crtc_id;
 	struct timeval start;
 	int swap_count;
 };
+
+void signal_handler(int signum)
+{
+	cancel = 1;
+}
 
 #define max(a, b) ((a) > (b) ? (a) : (b))
 
@@ -217,7 +238,7 @@ int main(int argc, char *argv[])
 	drmModeCrtcPtr orig_crtc;
 	struct kms_driver *kms_driver;
 	struct buffer buf1, buf2;
-	void *map_buf;
+	struct sigaction action;
 	int ret, i;
 	
 	fd = open("/dev/dri/card0", O_RDWR);
@@ -331,7 +352,12 @@ int main(int argc, char *argv[])
 	evctx.vblank_handler = NULL;
 	evctx.page_flip_handler = page_flip_handler;
 
-	while (1) {
+	memset(&action, 0, sizeof(struct sigaction));
+	action.sa_handler = signal_handler;
+	sigaction(SIGTERM, &action, NULL);
+	sigaction(SIGINT, &action, NULL);
+
+	while (!cancel) {
 		struct timeval timeout = { 
 			.tv_sec = 3, 
 			.tv_usec = 0 
