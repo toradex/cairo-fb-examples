@@ -10,11 +10,21 @@
 #include <math.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <drm/drm_fourcc.h>
 #include <libkms.h>
 #include <cairo.h>
 
+struct buffer {
+	int bo_handles[4];
+	int pitches[4];
+	int offsets[4];
+
+	int fb_id;
+	struct kms_bo *kms_bo;
+};
+
 struct flip_context{
-	int fb_id[2];
+	struct buffer *buffers[2];
 	int current_fb_id;
 	int crtc_id;
 	struct timeval start;
@@ -78,8 +88,8 @@ void draw_buffer_with_cairo(char *addr, int w, int h, int pitch)
 }
 
 void create_bo(struct kms_driver *kms_driver, 
-	int w, int h, int *out_pitch, struct kms_bo **out_kms_bo, 
-	int *out_handle, draw_func_t draw)
+	int w, int h, int *out_handle, int *out_pitch,
+	struct kms_bo **out_kms_bo, draw_func_t draw)
 {
 	void *map_buf;
 	struct kms_bo *bo;
@@ -146,16 +156,14 @@ void page_flip_handler(int fd, unsigned int frame,
 	struct timeval end;
 	double t;
 
-	printf("page_flip_handler\n");
 	context = data;
-	if (context->current_fb_id == context->fb_id[0])
-		new_fb_id = context->fb_id[1];
+	if (context->current_fb_id == context->buffers[0]->fb_id)
+		new_fb_id = context->buffers[1]->fb_id;
 	else
-		new_fb_id = context->fb_id[0];
+		new_fb_id = context->buffers[0]->fb_id;
 			
 	drmModePageFlip(fd, context->crtc_id, new_fb_id,
 			DRM_MODE_PAGE_FLIP_EVENT, context);
-	printf("page_flip requested\n");
 	context->current_fb_id = new_fb_id;
 	context->swap_count++;
 	if (context->swap_count == 60) {
@@ -166,35 +174,66 @@ void page_flip_handler(int fd, unsigned int frame,
 		context->swap_count = 0;
 		context->start = end;
 	}
-} 
+}
+
+int alloc_bo(int fd, struct kms_driver *kms_driver, int width, int height,
+	     struct buffer *buf, draw_func_t draw)
+{
+	int ret;
+
+	create_bo(kms_driver, width, height, &buf->bo_handles[0], &buf->pitches[0],
+		  &buf->kms_bo, draw);
+
+	/* add bo object as FB */
+	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_ARGB8888, buf->bo_handles,
+			    buf->pitches, buf->offsets, &buf->fb_id, 0);
+	if(ret){
+		fprintf(stderr, "drmModeAddFB2 failed (%ux%u): %s\n",
+			width, height, strerror(errno));
+		goto free;
+	}
+
+	return 0;
+
+free:
+	kms_bo_destroy(&buf->kms_bo);
+
+	return ret;
+}
+
+int free_bo(int fd, struct kms_driver *kms_driver, struct buffer *buf)
+{
+	drmModeRmFB(fd, buf->fb_id);
+	kms_bo_destroy(&buf->kms_bo);
+}
 
 int main(int argc, char *argv[])
 {
-	int fd, pitch, bo_handle, fb_id, second_fb_id;
+	int fd;
 	drmModeRes *resources;
 	drmModeConnector *connector;
 	drmModeEncoder *encoder;
 	drmModeModeInfo mode;
 	drmModeCrtcPtr orig_crtc;
 	struct kms_driver *kms_driver;
-	struct kms_bo *kms_bo, *second_kms_bo;
+	struct buffer buf1, buf2;
 	void *map_buf;
 	int ret, i;
 	
 	fd = open("/dev/dri/card0", O_RDWR);
-	if(fd < 0){
+	if (fd < 0){
 		fprintf(stderr, "drmOpen failed: %s\n", strerror(errno));
 		goto out;
 	}
 
 	resources = drmModeGetResources(fd);
-	if(resources == NULL){
+	if (resources == NULL){
 		fprintf(stderr, "drmModeGetResources failed: %s\n", strerror(errno));
 		goto close_fd;
 	}
 
 	/* find the first available connector with modes */
-	for(i=0; i < resources->count_connectors; ++i){
+	for (i = 0; i < resources->count_connectors; ++i){
 		connector = drmModeGetConnector(fd, resources->connectors[i]);
 		if(connector != NULL){
 			fprintf(stderr, "connector %d found\n", connector->connector_id);
@@ -215,7 +254,7 @@ int main(int argc, char *argv[])
 	fprintf(stderr, "(%dx%d)\n", mode.hdisplay, mode.vdisplay);
 
 	/* find the encoder matching the first available connector */
-	for(i=0; i < resources->count_encoders; ++i){
+	for (i = 0; i < resources->count_encoders; ++i){
 		encoder = drmModeGetEncoder(fd, resources->encoders[i]);
 		if(encoder != NULL){
 			fprintf(stderr, "encoder %d found\n", encoder->encoder_id);
@@ -225,70 +264,56 @@ int main(int argc, char *argv[])
 		} else
 			fprintf(stderr, "get a null encoder pointer\n");
 	}
-	if(i == resources->count_encoders){
+	if (i == resources->count_encoders){
 		fprintf(stderr, "No matching encoder with connector, shouldn't happen\n");
 		goto free_drm_res;
 	}
 
 	/* init kms bo stuff */	
 	ret = kms_create(fd, &kms_driver);
-	if(ret){
+	if (ret){
 		fprintf(stderr, "kms_create failed: %s\n", strerror(errno));
 		goto free_drm_res;
 	}
 
-	create_bo(kms_driver, mode.hdisplay, mode.vdisplay, 
-		&pitch, &kms_bo, &bo_handle, draw_buffer);
-
-	/* add FB which is associated with bo */
-	ret = drmModeAddFB(fd, mode.hdisplay, mode.vdisplay, 24, 32, pitch, bo_handle, &fb_id);
-	if(ret){
-		fprintf(stderr, "drmModeAddFB failed (%ux%u): %s\n",
-			mode.hdisplay, mode.vdisplay, strerror(errno));
-		goto free_first_bo;
-	}
+	memset(&buf1, 0, sizeof(struct buffer));
+	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf1, draw_buffer);
+	if (ret)
+		goto free_drm_res;
 
 	orig_crtc = drmModeGetCrtc(fd, encoder->crtc_id);
 	if (orig_crtc == NULL)
-	  goto free_first_bo;
+		goto free_first_buf;
 
 	/* kernel mode setting, wow! */
-	ret = drmModeSetCrtc(
-				fd, encoder->crtc_id, fb_id, 
-				0, 0, 	/* x, y */ 
-				&connector->connector_id, 
-				1, 		/* element count of the connectors array above*/
+	ret = drmModeSetCrtc(fd, encoder->crtc_id, buf1.fb_id,
+				0, 0, 	/* x, y */
+				&connector->connector_id,
+				1, 	/* element count of the connectors array above*/
 				&mode);
-	if(ret){
+	if (ret) {
 		fprintf(stderr, "drmModeSetCrtc failed: %s\n", strerror(errno));
-		goto free_first_fb;
+		goto free_first_buf;
 	}
 
-	create_bo(kms_driver, mode.hdisplay, mode.vdisplay, 
-		&pitch, &second_kms_bo, &bo_handle, draw_buffer_with_cairo);
+	memset(&buf2, 0, sizeof(struct buffer));
+	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf2, draw_buffer_with_cairo);
+	if (ret)
+		goto free_first_buf;
 
-	/* add another FB which is associated with bo */
-	ret = drmModeAddFB(fd, mode.hdisplay, mode.vdisplay, 24, 32, pitch, bo_handle, &second_fb_id);
-	if(ret){
-		fprintf(stderr, "drmModeAddFB failed (%ux%u): %s\n",
-			mode.hdisplay, mode.vdisplay, strerror(errno));
-		goto free_second_bo;
-	}
-	
 	struct flip_context flip_context;
-	memset(&flip_context, 0, sizeof flip_context);
-	ret = drmModePageFlip(
-		fd, encoder->crtc_id, second_fb_id,
-		DRM_MODE_PAGE_FLIP_EVENT, &flip_context);
+	memset(&flip_context, 0, sizeof(flip_context));
+	ret = drmModePageFlip(fd, encoder->crtc_id, buf2.fb_id,
+				DRM_MODE_PAGE_FLIP_EVENT, &flip_context);
 	
 	if (ret) {
 		fprintf(stderr, "failed to page flip: %s\n", strerror(errno));
-		goto free_second_fb;
+		goto free_second_buf;
 	}
 
-	flip_context.fb_id[0] = fb_id;
-	flip_context.fb_id[1] = second_fb_id;
-	flip_context.current_fb_id = second_fb_id;
+	flip_context.buffers[0] = &buf1;
+	flip_context.buffers[1] = &buf2;
+	flip_context.current_fb_id = buf2.fb_id;
 	flip_context.crtc_id = encoder->crtc_id;
 	flip_context.swap_count = 0;
 	gettimeofday(&flip_context.start, NULL);
@@ -306,7 +331,7 @@ int main(int argc, char *argv[])
 	evctx.vblank_handler = NULL;
 	evctx.page_flip_handler = page_flip_handler;
 
-	while(1){
+	while (1) {
 		struct timeval timeout = { 
 			.tv_sec = 3, 
 			.tv_usec = 0 
@@ -326,12 +351,10 @@ int main(int argc, char *argv[])
 				break;
 		} else {
 			/* drm device fd data ready */
-			while (1) {
 			ret = drmHandleEvent(fd, &evctx);
 			if (ret != 0) {
 				fprintf(stderr, "drmHandleEvent failed: %s\n", strerror(errno));
 				break;
-			}
 			}
 		}
 	}
@@ -346,18 +369,11 @@ int main(int argc, char *argv[])
 	/* restore the old terminal settings */
 	tcsetattr(STDIN_FILENO,TCSANOW,&old_tio);
 
-
-free_second_fb:
-	drmModeRmFB(fd, second_fb_id);
+free_second_buf:
+	free_bo(fd, kms_driver, &buf2);
 	
-free_second_bo:
-	kms_bo_destroy(&second_kms_bo);
-	
-free_first_fb:
-	drmModeRmFB(fd, fb_id);
-	
-free_first_bo:
-	kms_bo_destroy(&kms_bo);
+free_first_buf:
+	free_bo(fd, kms_driver, &buf1);
 
 free_kms_driver:
 	kms_destroy(&kms_driver);
@@ -369,6 +385,8 @@ close_fd:
 	drmClose(fd);
 	
 out:
+	if (ret)
+		return EXIT_FAILURE;
 	return EXIT_SUCCESS;
 }
 
