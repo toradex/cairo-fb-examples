@@ -330,13 +330,6 @@ int main(int argc, char *argv[])
 	flip_context.swap_count = 0;
 	gettimeofday(&flip_context.start, NULL);
 
-	/* disable stdin buffered i/o and local echo */
-	struct termios old_tio, new_tio;
-	tcgetattr(STDIN_FILENO,&old_tio);
-	new_tio = old_tio;
-	new_tio.c_lflag &= (~ICANON & ~ECHO);
-	tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
-
 	drmEventContext evctx;
 	memset(&evctx, 0, sizeof evctx);
 	evctx.version = DRM_EVENT_CONTEXT_VERSION;
@@ -356,16 +349,11 @@ int main(int argc, char *argv[])
 		fd_set fds;
 
 		FD_ZERO(&fds);
-		FD_SET(STDIN_FILENO, &fds);
 		FD_SET(fd, &fds);
-		ret = select(max(STDIN_FILENO, fd) + 1, &fds, NULL, NULL, &timeout);
+		ret = select(fd + 1, &fds, NULL, NULL, &timeout);
 
 		if (ret <= 0) {
 			continue;
-		} else if (FD_ISSET(STDIN_FILENO, &fds)) {
-			char c = getchar();
-			if(c == 'q' || c == 27)
-				break;
 		} else {
 			/* drm device fd data ready */
 			ret = drmHandleEvent(fd, &evctx);
@@ -382,9 +370,6 @@ int main(int argc, char *argv[])
 	if (ret) {
 		fprintf(stderr, "drmModeSetCrtc() restore original crtc failed: %m\n");
 	}
-
-	/* restore the old terminal settings */
-	tcsetattr(STDIN_FILENO,TCSANOW,&old_tio);
 
 free_second_buf:
 	free_bo(fd, kms_driver, &buf2);
