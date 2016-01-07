@@ -37,6 +37,7 @@ struct buffer {
 
 	int fb_id;
 	struct kms_bo *kms_bo;
+	void *map_buf;
 };
 
 struct flip_context {
@@ -66,8 +67,8 @@ void draw_buffer(char *addr, int w, int h, int pitch)
 		for (i = 0; i < w; i++) {
 			div_t d = div(i, w);
 			fb_ptr[i] =
-				0x00130502 * (d.quot >> 6) +
-				0x000a1120 * (d.rem >> 6);
+				0xff130502 * (d.quot >> 6) +
+				0xff0a1120 * (d.rem >> 6);
 		}
 	}
 }
@@ -108,13 +109,9 @@ void draw_buffer_with_cairo(char *addr, int w, int h, int pitch)
 	cairo_destroy(cr);
 }
 
-void create_bo(struct kms_driver *kms_driver, 
-	int w, int h, int *out_handle, int *out_pitch,
-	struct kms_bo **out_kms_bo, draw_func_t draw)
+static int create_bo(struct kms_driver *kms_driver, 
+		     int w, int h, struct buffer *buf)
 {
-	void *map_buf;
-	struct kms_bo *bo;
-	int pitch, handle;
 	unsigned bo_attribs[] = {
 		KMS_WIDTH,   w,
 		KMS_HEIGHT,  h,
@@ -124,49 +121,40 @@ void create_bo(struct kms_driver *kms_driver,
 	int ret;
 
 	/* ceate kms buffer object, opaque struct identied by struct kms_bo pointer */
-	ret = kms_bo_create(kms_driver, bo_attribs, &bo);
+	ret = kms_bo_create(kms_driver, bo_attribs, &buf->kms_bo);
 	if(ret){
 		fprintf(stderr, "kms_bo_create failed: %s\n", strerror(errno));
 		goto exit;
 	}
 
 	/* get the "pitch" or "stride" of the bo */
-	ret = kms_bo_get_prop(bo, KMS_PITCH, &pitch);
+	ret = kms_bo_get_prop(buf->kms_bo, KMS_PITCH, &buf->pitches[0]);
 	if(ret){
 		fprintf(stderr, "kms_bo_get_prop KMS_PITCH failed: %s\n", strerror(errno));
 		goto free_bo;
 	}
 
 	/* get the handle of the bo */
-	ret = kms_bo_get_prop(bo, KMS_HANDLE, &handle);
+	ret = kms_bo_get_prop(buf->kms_bo, KMS_HANDLE, &buf->bo_handles[0]);
 	if(ret){
-		fprintf(stderr, "kms_bo_get_prop KMS_HANDL failed: %s\n", strerror(errno));
+		fprintf(stderr, "kms_bo_get_prop KMS_HANDLE failed: %s\n", strerror(errno));
 		goto free_bo;
 	}
 
 	/* map the bo to user space buffer */
-	ret = kms_bo_map(bo, &map_buf);
+	ret = kms_bo_map(buf->kms_bo, &buf->map_buf);
 	if(ret){
 		fprintf(stderr, "kms_bo_map failed: %s\n", strerror(errno));
 		goto free_bo;
 	}
 
-	draw(map_buf, w, h, pitch);
-
-	kms_bo_unmap(bo);
-
-	ret = 0;
-	*out_kms_bo = bo;
-	*out_pitch = pitch;
-	*out_handle = handle;
-	goto exit;
+	return 0;
 
 free_bo:
-	kms_bo_destroy(&bo);
-	
-exit:
-	return;
+	kms_bo_destroy(&buf->kms_bo);
 
+exit:
+	return ret;
 }
 
 void page_flip_handler(int fd, unsigned int frame,
@@ -202,8 +190,10 @@ int alloc_bo(int fd, struct kms_driver *kms_driver, int width, int height,
 {
 	int ret;
 
-	create_bo(kms_driver, width, height, &buf->bo_handles[0], &buf->pitches[0],
-		  &buf->kms_bo, draw);
+	ret = create_bo(kms_driver, width, height, buf);
+	if (ret)
+		return ret;
+	draw(buf->map_buf, width, height, buf->pitches[0]);
 
 	/* add bo object as FB */
 	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_ARGB8888, buf->bo_handles,
@@ -225,6 +215,7 @@ free:
 int free_bo(int fd, struct kms_driver *kms_driver, struct buffer *buf)
 {
 	drmModeRmFB(fd, buf->fb_id);
+	kms_bo_unmap(buf->kms_bo);
 	kms_bo_destroy(&buf->kms_bo);
 }
 
