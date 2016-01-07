@@ -38,11 +38,17 @@ struct buffer {
 	int fb_id;
 	struct kms_bo *kms_bo;
 	void *map_buf;
+	cairo_surface_t *buf_surface;
+	cairo_t *buf_ctx;
 };
 
 struct flip_context {
 	struct buffer *buffers[2];
-	int current_fb_id;
+	struct buffer *current_buffer;
+	cairo_surface_t *surface;
+	cairo_t *ctx;
+	int width;
+	int height;
 	int crtc_id;
 	struct timeval start;
 	int swap_count;
@@ -148,6 +154,11 @@ static int create_bo(struct kms_driver *kms_driver,
 		goto free_bo;
 	}
 
+	/* create a cairo surface with the right format */
+	buf->buf_surface = cairo_image_surface_create_for_data(buf->map_buf,
+		CAIRO_FORMAT_ARGB32, w, h, buf->pitches[0]);
+	buf->buf_ctx = cairo_create(buf->buf_surface);
+
 	return 0;
 
 free_bo:
@@ -161,19 +172,41 @@ void page_flip_handler(int fd, unsigned int frame,
 		  unsigned int sec, unsigned int usec, void *data)
 {
 	struct flip_context *context;
-	unsigned int new_fb_id;
+	struct buffer *next_buffer;
 	struct timeval end;
 	double t;
+	float r, g, b;
+	int startx, starty, sizex, sizey;
+	cairo_t *cr;
 
 	context = data;
-	if (context->current_fb_id == context->buffers[0]->fb_id)
-		new_fb_id = context->buffers[1]->fb_id;
+	if (context->current_buffer == context->buffers[0])
+		next_buffer = context->buffers[1];
 	else
-		new_fb_id = context->buffers[0]->fb_id;
-			
-	drmModePageFlip(fd, context->crtc_id, new_fb_id,
+		next_buffer = context->buffers[0];
+
+	/* Draw a new rectangle */
+	r = (rand() % 100) / 100.0;
+	g = (rand() % 100) / 100.0;
+	b = (rand() % 100) / 100.0;
+	startx = rand() % context->width;
+	starty = rand() % context->height;
+	sizex = rand() % (context->width - startx);
+	sizey = rand() % (context->height - starty);
+
+	cr = context->ctx;
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_rectangle(cr, startx, starty, sizex, sizey);
+	cairo_stroke_preserve(cr);
+	cairo_fill(cr);
+
+	/* Draw to next buffer */
+	cairo_set_source_surface(next_buffer->buf_ctx, context->surface, 0, 0);
+	cairo_paint(next_buffer->buf_ctx);
+
+	drmModePageFlip(fd, context->crtc_id, next_buffer->fb_id,
 			DRM_MODE_PAGE_FLIP_EVENT, context);
-	context->current_fb_id = new_fb_id;
+	context->current_buffer = next_buffer;
 	context->swap_count++;
 	if (context->swap_count == 60) {
 		gettimeofday(&end, NULL);
@@ -214,6 +247,8 @@ free:
 
 int free_bo(int fd, struct kms_driver *kms_driver, struct buffer *buf)
 {
+	cairo_surface_destroy(buf->buf_surface);
+	cairo_destroy(buf->buf_ctx);
 	drmModeRmFB(fd, buf->fb_id);
 	kms_bo_unmap(buf->kms_bo);
 	kms_bo_destroy(&buf->kms_bo);
@@ -325,7 +360,12 @@ int main(int argc, char *argv[])
 
 	flip_context.buffers[0] = &buf1;
 	flip_context.buffers[1] = &buf2;
-	flip_context.current_fb_id = buf2.fb_id;
+	flip_context.current_buffer = &buf2;
+	flip_context.width = mode.hdisplay;
+	flip_context.height = mode.vdisplay;
+	flip_context.surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+			mode.hdisplay, mode.vdisplay);
+	flip_context.ctx = cairo_create(flip_context.surface);
 	flip_context.crtc_id = encoder->crtc_id;
 	flip_context.swap_count = 0;
 	gettimeofday(&flip_context.start, NULL);
