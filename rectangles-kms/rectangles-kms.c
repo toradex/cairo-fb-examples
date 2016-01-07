@@ -59,62 +59,6 @@ void signal_handler(int signum)
 	cancel = 1;
 }
 
-#define max(a, b) ((a) > (b) ? (a) : (b))
-
-typedef void (*draw_func_t)(char *addr, int w, int h, int pitch);
-
-void draw_buffer(char *addr, int w, int h, int pitch)
-{
-	int ret, i, j;
-
-	/* paint the buffer with colored tiles */
-	for (j = 0; j < h; j++) {
-		uint32_t *fb_ptr = (uint32_t*)((char*)addr + j * pitch);
-		for (i = 0; i < w; i++) {
-			div_t d = div(i, w);
-			fb_ptr[i] =
-				0xff130502 * (d.quot >> 6) +
-				0xff0a1120 * (d.rem >> 6);
-		}
-	}
-}
-
-void draw_buffer_with_cairo(char *addr, int w, int h, int pitch)
-{
-	cairo_t *cr;
-	cairo_surface_t *surface;
-
-	surface = cairo_image_surface_create_for_data(
-		addr,
-		CAIRO_FORMAT_ARGB32,
-        w, h, pitch);
-	cr = cairo_create(surface);
-	cairo_surface_destroy(surface);
-
-	/* Use normalized coordinates hereinafter */
-	cairo_scale (cr, w, h);
-
-	/* rectangle stroke */
-	cairo_set_source_rgb (cr, 1, 1, 1);
-	cairo_set_line_width (cr, 0.05);
-	cairo_rectangle (cr, 0.1, 0.1, 0.3, 0.4);
-	cairo_stroke (cr);
-
-	/* circle fill */
-	cairo_set_source_rgba(cr, 1, 0, 0, 0.5);
-	cairo_arc(cr, 0.7, 0.3, 0.2, 0, 2 * M_PI);
-	cairo_fill(cr);
-
-	/* text */
-	cairo_set_source_rgb (cr, 1.0, 1.0, 1.0);
-	cairo_select_font_face (cr, "serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-	cairo_set_font_size (cr, 0.1);
-	cairo_move_to (cr, 0.1, 0.8);
-	cairo_show_text (cr, "drawn with cairo");
-	
-	cairo_destroy(cr);
-}
-
 static int create_bo(struct kms_driver *kms_driver, 
 		     int w, int h, struct buffer *buf)
 {
@@ -218,15 +162,14 @@ void page_flip_handler(int fd, unsigned int frame,
 	}
 }
 
-int alloc_bo(int fd, struct kms_driver *kms_driver, int width, int height,
-	     struct buffer *buf, draw_func_t draw)
+static int alloc_bo(int fd, struct kms_driver *kms_driver, int width, int height,
+		    struct buffer *buf)
 {
 	int ret;
 
 	ret = create_bo(kms_driver, width, height, buf);
 	if (ret)
 		return ret;
-	draw(buf->map_buf, width, height, buf->pitches[0]);
 
 	/* add bo object as FB */
 	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_ARGB8888, buf->bo_handles,
@@ -245,7 +188,7 @@ free:
 	return ret;
 }
 
-int free_bo(int fd, struct kms_driver *kms_driver, struct buffer *buf)
+static int free_bo(int fd, struct kms_driver *kms_driver, struct buffer *buf)
 {
 	cairo_surface_destroy(buf->buf_surface);
 	cairo_destroy(buf->buf_ctx);
@@ -324,7 +267,7 @@ int main(int argc, char *argv[])
 	}
 
 	memset(&buf1, 0, sizeof(struct buffer));
-	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf1, draw_buffer);
+	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf1);
 	if (ret)
 		goto free_drm_res;
 
@@ -344,7 +287,7 @@ int main(int argc, char *argv[])
 	}
 
 	memset(&buf2, 0, sizeof(struct buffer));
-	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf2, draw_buffer_with_cairo);
+	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf2);
 	if (ret)
 		goto free_first_buf;
 
