@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -31,15 +32,15 @@
 static volatile sig_atomic_t cancel = 0;
 
 struct buffer {
-	int bo_handles[4];
-	int pitches[4];
-	int offsets[4];
+	int handle;
+	int size;
+	int pitch;
 
-	int fb_id;
-	struct kms_bo *kms_bo;
-	void *map_buf;
+	void *ptr;
 	cairo_surface_t *buf_surface;
 	cairo_t *buf_ctx;
+
+	int fb_id;
 };
 
 struct flip_context {
@@ -59,57 +60,49 @@ void signal_handler(int signum)
 	cancel = 1;
 }
 
-static int create_bo(struct kms_driver *kms_driver, 
-		     int w, int h, struct buffer *buf)
+static int create_bo(int fd, struct buffer *buf, int w, int h, int bpp)
 {
-	unsigned bo_attribs[] = {
-		KMS_WIDTH,   w,
-		KMS_HEIGHT,  h,
-		KMS_BO_TYPE, KMS_BO_TYPE_SCANOUT_X8R8G8B8,
-		KMS_TERMINATE_PROP_LIST
-	};
+	struct drm_mode_create_dumb argc;
+	struct drm_mode_map_dumb argm;
 	int ret;
+	void *map;
 
-	/* ceate kms buffer object, opaque struct identied by struct kms_bo pointer */
-	ret = kms_bo_create(kms_driver, bo_attribs, &buf->kms_bo);
-	if(ret){
-		fprintf(stderr, "kms_bo_create failed: %s\n", strerror(errno));
-		goto exit;
+	/* use DRM dumb buffers */
+	memset(&argc, 0, sizeof(argc));
+	argc.bpp = bpp;
+	argc.width = w;
+	argc.height = h;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &argc);
+	if (ret) {
+		fprintf(stderr, "failed to create dumb buffer: %s\n",
+				strerror(errno));
+		return ret;
 	}
 
-	/* get the "pitch" or "stride" of the bo */
-	ret = kms_bo_get_prop(buf->kms_bo, KMS_PITCH, &buf->pitches[0]);
-	if(ret){
-		fprintf(stderr, "kms_bo_get_prop KMS_PITCH failed: %s\n", strerror(errno));
-		goto free_bo;
-	}
-
-	/* get the handle of the bo */
-	ret = kms_bo_get_prop(buf->kms_bo, KMS_HANDLE, &buf->bo_handles[0]);
-	if(ret){
-		fprintf(stderr, "kms_bo_get_prop KMS_HANDLE failed: %s\n", strerror(errno));
-		goto free_bo;
-	}
+	buf->handle = argc.handle;
+	buf->size = argc.size;
+	buf->pitch = argc.pitch;
 
 	/* map the bo to user space buffer */
-	ret = kms_bo_map(buf->kms_bo, &buf->map_buf);
-	if(ret){
-		fprintf(stderr, "kms_bo_map failed: %s\n", strerror(errno));
-		goto free_bo;
-	}
+	memset(&argm, 0, sizeof(argm));
+	argm.handle = buf->handle;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &argm);
+	if (ret)
+		return ret;
+
+	map = mmap(NULL, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+			fd, argm.offset);
+	if (map == MAP_FAILED)
+		return -EINVAL;
+
+	buf->ptr = map;
 
 	/* create a cairo surface with the right format */
-	buf->buf_surface = cairo_image_surface_create_for_data(buf->map_buf,
-		CAIRO_FORMAT_ARGB32, w, h, buf->pitches[0]);
+	buf->buf_surface = cairo_image_surface_create_for_data(buf->ptr,
+		CAIRO_FORMAT_ARGB32, w, h, buf->pitch);
 	buf->buf_ctx = cairo_create(buf->buf_surface);
 
 	return 0;
-
-free_bo:
-	kms_bo_destroy(&buf->kms_bo);
-
-exit:
-	return ret;
 }
 
 void page_flip_handler(int fd, unsigned int frame,
@@ -162,18 +155,42 @@ void page_flip_handler(int fd, unsigned int frame,
 	}
 }
 
-static int alloc_bo(int fd, struct kms_driver *kms_driver, int width, int height,
-		    struct buffer *buf)
+static int free_bo(int fd, struct buffer *buf)
 {
+	struct drm_mode_destroy_dumb arg;
 	int ret;
 
-	ret = create_bo(kms_driver, width, height, buf);
+	cairo_surface_destroy(buf->buf_surface);
+	cairo_destroy(buf->buf_ctx);
+	munmap(buf->ptr, buf->size);
+
+	memset(&arg, 0, sizeof(arg));
+	arg.handle = buf->handle;
+
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &arg);
+	if (ret) {
+		fprintf(stderr, "failed to destroy dumb buffer: %s\n",
+				strerror(errno));
+		return ret;
+	}
+
+	return 0;
+}
+
+static int alloc_bo(int fd, int width, int height, struct buffer *buf)
+{
+	int handles[4] = { 0 }, pitches[4] = { 0 }, offsets[4] = { 0 };
+	int ret;
+
+	ret = create_bo(fd, buf, width, height, 32);
 	if (ret)
 		return ret;
 
 	/* add bo object as FB */
-	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_ARGB8888, buf->bo_handles,
-			    buf->pitches, buf->offsets, &buf->fb_id, 0);
+	handles[0] = buf->handle;
+	pitches[0] = buf->pitch;
+	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_ARGB8888, handles,
+			    pitches, offsets, &buf->fb_id, 0);
 	if(ret){
 		fprintf(stderr, "drmModeAddFB2 failed (%ux%u): %s\n",
 			width, height, strerror(errno));
@@ -183,18 +200,9 @@ static int alloc_bo(int fd, struct kms_driver *kms_driver, int width, int height
 	return 0;
 
 free:
-	kms_bo_destroy(&buf->kms_bo);
+	free_bo(fd, buf);
 
 	return ret;
-}
-
-static int free_bo(int fd, struct kms_driver *kms_driver, struct buffer *buf)
-{
-	cairo_surface_destroy(buf->buf_surface);
-	cairo_destroy(buf->buf_ctx);
-	drmModeRmFB(fd, buf->fb_id);
-	kms_bo_unmap(buf->kms_bo);
-	kms_bo_destroy(&buf->kms_bo);
 }
 
 int main(int argc, char *argv[])
@@ -205,7 +213,6 @@ int main(int argc, char *argv[])
 	drmModeEncoder *encoder;
 	drmModeModeInfo mode;
 	drmModeCrtcPtr orig_crtc;
-	struct kms_driver *kms_driver;
 	struct buffer buf1, buf2;
 	struct sigaction action;
 	int ret, i;
@@ -259,15 +266,9 @@ int main(int argc, char *argv[])
 		goto free_drm_res;
 	}
 
-	/* init kms bo stuff */	
-	ret = kms_create(fd, &kms_driver);
-	if (ret){
-		fprintf(stderr, "kms_create failed: %s\n", strerror(errno));
-		goto free_drm_res;
-	}
-
+	/* init DRM dumb buffers */
 	memset(&buf1, 0, sizeof(struct buffer));
-	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf1);
+	ret = alloc_bo(fd, mode.hdisplay, mode.vdisplay, &buf1);
 	if (ret)
 		goto free_drm_res;
 
@@ -287,7 +288,7 @@ int main(int argc, char *argv[])
 	}
 
 	memset(&buf2, 0, sizeof(struct buffer));
-	ret = alloc_bo(fd, kms_driver, mode.hdisplay, mode.vdisplay, &buf2);
+	ret = alloc_bo(fd, mode.hdisplay, mode.vdisplay, &buf2);
 	if (ret)
 		goto free_first_buf;
 
@@ -355,14 +356,11 @@ int main(int argc, char *argv[])
 	}
 
 free_second_buf:
-	free_bo(fd, kms_driver, &buf2);
+	free_bo(fd, &buf2);
 	
 free_first_buf:
-	free_bo(fd, kms_driver, &buf1);
+	free_bo(fd, &buf1);
 
-free_kms_driver:
-	kms_destroy(&kms_driver);
-	
 free_drm_res:
 	drmModeFreeResources(resources);
 
