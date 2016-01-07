@@ -99,7 +99,7 @@ static int create_bo(int fd, struct buffer *buf, int w, int h, int bpp)
 
 	/* create a cairo surface with the right format */
 	buf->buf_surface = cairo_image_surface_create_for_data(buf->ptr,
-		CAIRO_FORMAT_ARGB32, w, h, buf->pitch);
+		CAIRO_FORMAT_RGB16_565, w, h, buf->pitch);
 	buf->buf_ctx = cairo_create(buf->buf_surface);
 
 	return 0;
@@ -182,14 +182,14 @@ static int alloc_bo(int fd, int width, int height, struct buffer *buf)
 	int handles[4] = { 0 }, pitches[4] = { 0 }, offsets[4] = { 0 };
 	int ret;
 
-	ret = create_bo(fd, buf, width, height, 32);
+	ret = create_bo(fd, buf, width, height, 16);
 	if (ret)
 		return ret;
 
 	/* add bo object as FB */
 	handles[0] = buf->handle;
 	pitches[0] = buf->pitch;
-	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_ARGB8888, handles,
+	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_RGB565, handles,
 			    pitches, offsets, &buf->fb_id, 0);
 	if(ret){
 		fprintf(stderr, "drmModeAddFB2 failed (%ux%u): %s\n",
@@ -307,7 +307,7 @@ int main(int argc, char *argv[])
 	flip_context.current_buffer = &buf2;
 	flip_context.width = mode.hdisplay;
 	flip_context.height = mode.vdisplay;
-	flip_context.surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+	flip_context.surface = cairo_image_surface_create(CAIRO_FORMAT_RGB16_565,
 			mode.hdisplay, mode.vdisplay);
 	flip_context.ctx = cairo_create(flip_context.surface);
 	flip_context.crtc_id = encoder->crtc_id;
