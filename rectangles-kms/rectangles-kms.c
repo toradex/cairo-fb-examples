@@ -164,6 +164,8 @@ static int free_bo(int fd, struct buffer *buf)
 	cairo_destroy(buf->buf_ctx);
 	munmap(buf->ptr, buf->size);
 
+	drmModeRmFB(fd, buf->fb_id);
+
 	memset(&arg, 0, sizeof(arg));
 	arg.handle = buf->handle;
 
@@ -224,7 +226,7 @@ int main(int argc, char *argv[])
 	}
 
 	resources = drmModeGetResources(fd);
-	if (resources == NULL){
+	if (resources == NULL) {
 		fprintf(stderr, "drmModeGetResources failed: %s\n", strerror(errno));
 		goto close_fd;
 	}
