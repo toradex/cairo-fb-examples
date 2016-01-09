@@ -9,23 +9,26 @@
  * This project is licensed under the terms of the MIT license (see
  * LICENSE)
  */
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cairo/cairo.h>
 #include <fcntl.h>
 #include <linux/types.h>
 #include <linux/ioctl.h>
 #include <linux/fb.h>
-#include <sys/mman.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include <signal.h>
-#include <cairo/cairo.h>
+#include <stropts.h>
+#include <sys/mman.h>
 #include <tslib.h>
+#include <time.h>
 
 static volatile sig_atomic_t cancel = 0;
 
 typedef struct _cairo_linuxfb_device {
 	int fb_fd;
-	char *fb_data;
+	unsigned char *fb_data;
 	long fb_screensize;
 	struct fb_var_screeninfo fb_vinfo;
 	struct fb_fix_screeninfo fb_finfo;
@@ -107,7 +110,7 @@ cairo_surface_t *cairo_linuxfb_surface_create(cairo_linuxfb_device_t *device, co
 	}
 
 	// Map the device to memory
-	device->fb_data = (char *)mmap(0, device->fb_finfo.smem_len,
+	device->fb_data = (unsigned char *)mmap(0, device->fb_finfo.smem_len,
 			PROT_READ | PROT_WRITE, MAP_SHARED,
 			device->fb_fd, 0);
 	if ((int)device->fb_data == -1) {
