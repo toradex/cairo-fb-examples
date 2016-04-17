@@ -105,6 +105,35 @@ static int create_bo(int fd, struct buffer *buf, int w, int h, int bpp)
 	return 0;
 }
 
+void draw_overlay(struct buffer *buf)
+{
+	cairo_surface_t *image;
+	cairo_t *cr = buf->buf_ctx;
+/*
+	cairo_set_source_rgb(cr, 1.0, 0.0, 0.0);
+	cairo_rectangle(cr, 0, 0, 320, 240);
+	cairo_stroke_preserve(cr);
+	cairo_fill(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+	cairo_paint(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+*/
+	/*
+	cairo_set_source_rgba(cr, 0.0, 0.321, 0.533, 0.8);
+	cairo_rectangle(cr, 0, 0, 320, 120);
+	cairo_fill(cr);
+	cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+	cairo_set_font_size(cr, 32.0);
+	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.8);
+	cairo_move_to(cr, 4, 36);
+	cairo_show_text(cr, "Toradex");
+	*/
+	image = cairo_image_surface_create_from_png ("toradex.png");
+	cairo_set_source_surface (cr, image, 0, 0);
+	cairo_paint(cr);
+	cairo_surface_destroy(image);
+}
+
 void page_flip_handler(int fd, unsigned int frame,
 		  unsigned int sec, unsigned int usec, void *data)
 {
@@ -164,6 +193,7 @@ static int free_bo(int fd, struct buffer *buf)
 	cairo_destroy(buf->buf_ctx);
 	munmap(buf->ptr, buf->size);
 
+	printf("drmModeRmFB %d\n", buf->fb_id);
 	drmModeRmFB(fd, buf->fb_id);
 
 	memset(&arg, 0, sizeof(arg));
@@ -211,11 +241,12 @@ int main(int argc, char *argv[])
 {
 	int fd;
 	drmModeRes *resources;
+	drmModePlaneRes *planeres;
 	drmModeConnector *connector;
 	drmModeEncoder *encoder;
 	drmModeModeInfo mode;
 	drmModeCrtcPtr orig_crtc;
-	struct buffer buf1, buf2;
+	struct buffer buf1, buf2, bufovr;
 	struct sigaction action;
 	int ret, i;
 	
@@ -247,6 +278,23 @@ int main(int argc, char *argv[])
 	if(i == resources->count_connectors){
 		fprintf(stderr, "No active connector found.\n");
 		goto free_drm_res;
+	}
+
+	planeres = drmModeGetPlaneResources(fd);
+	if (planeres == NULL) {
+		fprintf(stderr, "drmModeGetPlaneResources failed: %s\n", strerror(errno));
+		goto close_fd;
+	}
+
+	for (i = 0; i < planeres->count_planes; i++) {
+		drmModePlane *p;
+		p = drmModeGetPlane(fd, planeres->planes[i]);
+		if (!p) {
+			fprintf(stderr, "drmModeGetPlane failed: %s\n", strerror(errno));
+			goto close_fd;
+		}
+
+		printf("found plane id %d\n", p->plane_id);
 	}
 
 	mode = connector->modes[0];
@@ -304,6 +352,21 @@ int main(int argc, char *argv[])
 		goto free_second_buf;
 	}
 
+	/* Create a buffer for the overlay plane */
+	memset(&bufovr, 0, sizeof(struct buffer));
+	int sizex = 500;//mode.hdisplay / 2;
+	int sizey = 115;//mode.vdisplay / 2;
+	ret = alloc_bo(fd, sizex, sizey, &bufovr);
+	if (ret)
+		goto free_second_buf;
+
+	draw_overlay(&bufovr);
+	ret = drmModeSetPlane(fd, planeres->planes[0], encoder->crtc_id,
+			bufovr.fb_id, 0, 10, 20, sizex, sizey,
+			0 << 16, 0 << 16, sizex << 16, sizey << 16);
+	if (ret)
+		goto free_overlay_buf;
+
 	flip_context.buffers[0] = &buf1;
 	flip_context.buffers[1] = &buf2;
 	flip_context.current_buffer = &buf2;
@@ -350,12 +413,18 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	ret = drmModeSetPlane(fd, planeres->planes[0], encoder->crtc_id, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0);
+
 	ret = drmModeSetCrtc(fd, orig_crtc->crtc_id, orig_crtc->buffer_id,
 					orig_crtc->x, orig_crtc->y,
 					&connector->connector_id, 1, &orig_crtc->mode);
 	if (ret) {
 		fprintf(stderr, "drmModeSetCrtc() restore original crtc failed: %m\n");
 	}
+
+free_overlay_buf:
+	free_bo(fd, &bufovr);
 
 free_second_buf:
 	free_bo(fd, &buf2);
