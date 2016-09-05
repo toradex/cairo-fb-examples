@@ -13,6 +13,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -246,9 +247,10 @@ int main(int argc, char *argv[])
 	drmModeEncoder *encoder;
 	drmModeModeInfo mode;
 	drmModeCrtcPtr orig_crtc;
-	struct buffer buf1, buf2, bufovr;
+	struct buffer buf1 = { 0 }, buf2 = { 0 }, bufovr = { 0 };
 	struct sigaction action;
 	int ret, i;
+	bool use_overlay;
 	
 	fd = open("/dev/dri/card0", O_RDWR);
 	if (fd < 0){
@@ -286,6 +288,7 @@ int main(int argc, char *argv[])
 		goto close_fd;
 	}
 
+	printf("Driver supports %d planes\n", planeres->count_planes);
 	for (i = 0; i < planeres->count_planes; i++) {
 		drmModePlane *p;
 		p = drmModeGetPlane(fd, planeres->planes[i]);
@@ -295,6 +298,7 @@ int main(int argc, char *argv[])
 		}
 
 		printf("found plane id %d\n", p->plane_id);
+		use_overlay = true;
 	}
 
 	mode = connector->modes[0];
@@ -317,7 +321,6 @@ int main(int argc, char *argv[])
 	}
 
 	/* init DRM dumb buffers */
-	memset(&buf1, 0, sizeof(struct buffer));
 	ret = alloc_bo(fd, mode.hdisplay, mode.vdisplay, &buf1);
 	if (ret)
 		goto free_drm_res;
@@ -337,7 +340,6 @@ int main(int argc, char *argv[])
 		goto free_first_buf;
 	}
 
-	memset(&buf2, 0, sizeof(struct buffer));
 	ret = alloc_bo(fd, mode.hdisplay, mode.vdisplay, &buf2);
 	if (ret)
 		goto free_first_buf;
@@ -352,20 +354,23 @@ int main(int argc, char *argv[])
 		goto free_second_buf;
 	}
 
-	/* Create a buffer for the overlay plane */
-	memset(&bufovr, 0, sizeof(struct buffer));
-	int sizex = 500;//mode.hdisplay / 2;
-	int sizey = 115;//mode.vdisplay / 2;
-	ret = alloc_bo(fd, sizex, sizey, &bufovr);
-	if (ret)
-		goto free_second_buf;
+	/* Create a buffer for the overlay plane if the driver supports it */
+	if (use_overlay) {
+		int sizex = 500;//mode.hdisplay / 2;
+		int sizey = 115;//mode.vdisplay / 2;
+		ret = alloc_bo(fd, sizex, sizey, &bufovr);
+		if (ret)
+			goto free_second_buf;
 
-	draw_overlay(&bufovr);
-	ret = drmModeSetPlane(fd, planeres->planes[0], encoder->crtc_id,
-			bufovr.fb_id, 0, 10, 20, sizex, sizey,
-			0 << 16, 0 << 16, sizex << 16, sizey << 16);
-	if (ret)
-		goto free_overlay_buf;
+		draw_overlay(&bufovr);
+		ret = drmModeSetPlane(fd, planeres->planes[0], encoder->crtc_id,
+				bufovr.fb_id, 0, 10, 20, sizex, sizey,
+				0 << 16, 0 << 16, sizex << 16, sizey << 16);
+		if (ret) {
+			printf("init overlay buffer failed\n");
+			goto free_overlay_buf;
+		}
+	}
 
 	flip_context.buffers[0] = &buf1;
 	flip_context.buffers[1] = &buf2;
@@ -413,8 +418,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	ret = drmModeSetPlane(fd, planeres->planes[0], encoder->crtc_id, 0,
-			0, 0, 0, 0, 0, 0, 0, 0, 0);
+	if (use_overlay)
+		ret = drmModeSetPlane(fd, planeres->planes[0], encoder->crtc_id, 0,
+				0, 0, 0, 0, 0, 0, 0, 0, 0);
 
 	ret = drmModeSetCrtc(fd, orig_crtc->crtc_id, orig_crtc->buffer_id,
 					orig_crtc->x, orig_crtc->y,
@@ -424,7 +430,8 @@ int main(int argc, char *argv[])
 	}
 
 free_overlay_buf:
-	free_bo(fd, &bufovr);
+	if (bufovr.handle)
+		free_bo(fd, &bufovr);
 
 free_second_buf:
 	free_bo(fd, &buf2);
